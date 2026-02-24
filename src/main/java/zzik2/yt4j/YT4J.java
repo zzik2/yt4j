@@ -143,6 +143,9 @@ public final class YT4J implements AutoCloseable {
      */
     public BroadcastInfo broadcastInfo() throws IOException {
         String vid = videoId != null ? videoId : resolveVideoIdOnly();
+        if (vid == null) {
+            return new BroadcastInfo(false, null, null);
+        }
         String url = "https://www.youtube.com/watch?v=" + vid + "&hl=en&pbj=1";
         Map<String, String> headers = new HashMap<>();
         headers.put("x-youtube-client-name", "1");
@@ -151,7 +154,6 @@ public final class YT4J implements AutoCloseable {
         JsonPath json = JsonPath.parse(response);
         JsonPath details = findByKey(json, "liveBroadcastDetails");
         if (details.isAbsent()) {
-            throw new IOException("방송 정보를 찾을 수 없습니다");
         }
         return new BroadcastInfo(
                 details.get("isLiveNow").asBoolean().orElse(false),
@@ -212,14 +214,14 @@ public final class YT4J implements AutoCloseable {
                 String html = http.get("https://www.youtube.com/channel/" + cid + "/live", Collections.emptyMap());
                 Matcher m = VIDEO_ID_FROM_PAGE.matcher(html);
                 if (m.find()) return m.group(1);
-                throw new IOException("채널이 현재 라이브 방송 중이 아닙니다: " + cid);
+                return null;
             }
             case USER: {
                 String handle = IdResolver.resolveUserHandle(inputId);
                 String html = http.get("https://www.youtube.com/@" + handle + "/live", Collections.emptyMap());
                 Matcher m = VIDEO_ID_FROM_PAGE.matcher(html);
                 if (m.find()) return m.group(1);
-                throw new IOException("사용자가 현재 라이브 방송 중이 아닙니다: " + handle);
+                return null;
             }
             default:
                 throw new IllegalStateException("알 수 없는 입력 유형: " + inputType);
