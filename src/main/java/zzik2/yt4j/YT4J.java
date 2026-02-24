@@ -154,6 +154,7 @@ public final class YT4J implements AutoCloseable {
         JsonPath json = JsonPath.parse(response);
         JsonPath details = findByKey(json, "liveBroadcastDetails");
         if (details.isAbsent()) {
+            return new BroadcastInfo(false, null, null);
         }
         return new BroadcastInfo(
                 details.get("isLiveNow").asBoolean().orElse(false),
