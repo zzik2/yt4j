@@ -1,0 +1,67 @@
+plugins {
+    id 'java'
+    id 'com.vanniktech.maven.publish' version '0.35.0'
+}
+
+group = 'kr.zzik2'
+version = '0.0.1'
+
+compileJava.options.encoding = 'UTF-8'
+compileTestJava.options.encoding = 'UTF-8'
+javadoc.options.encoding = 'UTF-8'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.10.1'
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(11)
+    }
+}
+
+mavenPublishing {
+    publishToMavenCentral(true)
+    signAllPublications()
+
+    coordinates(group, "yt4j", version as String)
+
+    pom {
+        name = "yt4j"
+        description = "YouTube 라이브 스트리밍의 채팅, 후원(Super Chat), 멤버십 이벤트를 실시간으로 구독하는 Java 라이브러리입니다."
+        inceptionYear = "2026"
+        url = "https://github.com/zzik2/yt4j"
+
+        licenses {
+            license {
+                name = "The MIT License"
+                url = "http://opensource.org/licenses/MIT"
+            }
+        }
+
+        developers {
+            developer {
+                id = "zzik2"
+                name = "zzik2"
+                url = "https://github.com/zzik2"
+            }
+        }
+
+        scm {
+            url = "https://github.com/zzik2/yt4j"
+            connection = "scm:git:git://github.com/zzik2/yt4j.git"
+            developerConnection = "scm:git:ssh://git@github.com/zzik2/yt4j.git"
+        }
+    }
+}
