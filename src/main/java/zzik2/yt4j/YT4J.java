@@ -1,7 +1,6 @@
 package zzik2.yt4j;
 
 import zzik2.yt4j.http.HttpClient;
-import zzik2.yt4j.model.*;
 import zzik2.yt4j.model.BroadcastInfo;
 import zzik2.yt4j.model.ChatMessage;
 import zzik2.yt4j.model.DeleteEvent;
@@ -11,7 +10,7 @@ import zzik2.yt4j.util.JsonPath;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -21,7 +20,8 @@ import java.util.regex.Pattern;
  * YouTube 라이브 채팅 구독 클라이언트.
  *
  * <p>
- * 빌더 패턴으로 인스턴스를 생성하고, {@link #connect()}로 자동 폴링을 시작합니다.
+ * 빌더 패턴으로 인스턴스를 생성하고, {@link #connect()} 또는 {@link #connectAsync()}로
+ * 자동 폴링을 시작합니다.
  * </p>
  *
  * <pre>{@code
@@ -32,6 +32,10 @@ import java.util.regex.Pattern;
  *         .onSuperChat(msg -> System.out.println("후원: " + msg.purchaseAmount()))
  *         .build();
  *
+ * // 비동기 연결
+ * client.connectAsync().thenRun(() -> System.out.println("연결됨!"));
+ *
+ * // 또는 블로킹 연결
  * client.connect();
  *
  * // ... 나중에
@@ -71,7 +75,8 @@ public final class YT4J implements AutoCloseable {
     private boolean replay;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private volatile Thread pollingThread;
+    private ScheduledExecutorService scheduler;
+    private ExecutorService callbackExecutor;
 
     private YT4J(Builder builder) {
         this.inputId = builder.inputId;
@@ -88,29 +93,59 @@ public final class YT4J implements AutoCloseable {
     }
 
     /**
-     * 자동 폴링 스레드를 시작하여 라이브 채팅에 연결합니다.
+     * 비동기로 라이브 채팅에 연결합니다.
+     *
+     * <p>
+     * 초기화와 폴링 시작을 별도 스레드에서 수행하며,
+     * 메인 스레드를 블로킹하지 않습니다.
+     * </p>
+     *
+     * @return 연결 완료 시 완료되는 CompletableFuture
+     */
+    public CompletableFuture<Void> connectAsync() {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                initialize();
+                startPolling();
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        });
+    }
+
+    /**
+     * 라이브 채팅에 연결합니다.
+     * 이 메서드는 초기화가 완료될 때까지 블로킹됩니다.
      *
      * @throws IOException 초기 연결 실패 시
      */
     public void connect() throws IOException {
-        initialize();
-        if (running.compareAndSet(false, true)) {
-            pollingThread = new Thread(this::pollingLoop, "yt4j-polling");
-            pollingThread.setDaemon(true);
-            pollingThread.start();
+        try {
+            connectAsync().join();
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            throw e;
         }
     }
 
     /**
-     * 자동 폴링을 중지하고 리소스를 정리합니다.
+     * 비동기로 폴링을 중지하고 리소스를 정리합니다.
+     *
+     * @return 종료 완료 시 완료되는 CompletableFuture
+     */
+    public CompletableFuture<Void> disconnectAsync() {
+        return CompletableFuture.runAsync(this::shutdownExecutors);
+    }
+
+    /**
+     * 폴링을 중지하고 리소스를 정리합니다.
+     * 이 메서드는 종료가 완료될 때까지 블로킹됩니다.
      */
     public void disconnect() {
-        running.set(false);
-        Thread t = pollingThread;
-        if (t != null) {
-            t.interrupt();
-            pollingThread = null;
-        }
+        shutdownExecutors();
     }
 
     /**
@@ -164,6 +199,21 @@ public final class YT4J implements AutoCloseable {
     }
 
     /**
+     * 비동기로 방송 정보를 조회합니다.
+     *
+     * @return 방송 정보가 담긴 CompletableFuture
+     */
+    public CompletableFuture<BroadcastInfo> broadcastInfoAsync() {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return broadcastInfo();
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        });
+    }
+
+    /**
      * 현재 연결된 영상 ID를 반환합니다.
      *
      * @return 영상 ID, 초기화 전이면 null
@@ -205,6 +255,56 @@ public final class YT4J implements AutoCloseable {
     }
 
     // 내부 구현
+
+    private void startPolling() {
+        if (!running.compareAndSet(false, true)) {
+            return;
+        }
+        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "yt4j-polling");
+            t.setDaemon(true);
+            return t;
+        });
+        callbackExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "yt4j-callback");
+            t.setDaemon(true);
+            return t;
+        });
+        scheduler.scheduleWithFixedDelay(this::pollSafely, 0, 1, TimeUnit.SECONDS);
+    }
+
+    private void pollSafely() {
+        if (!running.get()) {
+            return;
+        }
+        try {
+            fetchOnce();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private void shutdownExecutors() {
+        running.set(false);
+        shutdownSingle(scheduler);
+        scheduler = null;
+        shutdownSingle(callbackExecutor);
+        callbackExecutor = null;
+    }
+
+    private static void shutdownSingle(ExecutorService exec) {
+        if (exec == null) {
+            return;
+        }
+        exec.shutdown();
+        try {
+            if (!exec.awaitTermination(5, TimeUnit.SECONDS)) {
+                exec.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            exec.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
 
     private String resolveVideoIdOnly() throws IOException {
         switch (inputType) {
@@ -292,28 +392,6 @@ public final class YT4J implements AutoCloseable {
         }
     }
 
-    private void pollingLoop() {
-        while (running.get() && !Thread.currentThread().isInterrupted()) {
-            try {
-                fetchOnce();
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (IOException e) {
-                if (running.get()) {
-                    try {
-                        Thread.sleep(3000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
-            }
-        }
-        running.set(false);
-    }
-
     private void fetchOnce() throws IOException {
         if (continuation == null) {
             throw new IOException("continuation 토큰이 없습니다. 연결을 다시 시도하세요.");
@@ -343,6 +421,15 @@ public final class YT4J implements AutoCloseable {
     }
 
     private void dispatch(List<ChatMessage> messages, List<DeleteEvent> deletes) {
+        ExecutorService cb = callbackExecutor;
+        if (cb == null || cb.isShutdown()) {
+            dispatchDirect(messages, deletes);
+            return;
+        }
+        cb.execute(() -> dispatchDirect(messages, deletes));
+    }
+
+    private void dispatchDirect(List<ChatMessage> messages, List<DeleteEvent> deletes) {
         for (ChatMessage msg : messages) {
             switch (msg.type()) {
                 case MESSAGE:
@@ -427,12 +514,9 @@ public final class YT4J implements AutoCloseable {
             first = false;
             sb.append("\"").append(entry.getKey()).append("\":");
             Object val = entry.getValue();
-            if (val instanceof String) {sb.append("\"").append(((String) val).replace("\"", "\\\"")).append("\"");
-            } else if (val instanceof Map) {
-                sb.append(toJson((Map<String, Object>) val));
-            } else {
-                sb.append(val);
-            }
+            if (val instanceof String) sb.append("\"").append(((String) val).replace("\"", "\\\"")).append("\"");
+            else if (val instanceof Map) sb.append(toJson((Map<String, Object>) val));
+            else sb.append(val);
         }
         sb.append("}");
         return sb.toString();

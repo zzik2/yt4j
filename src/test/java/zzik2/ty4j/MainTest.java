@@ -4,10 +4,11 @@ import zzik2.yt4j.YT4J;
 
 import java.io.IOException;
 import java.util.Locale;
+import java.util.concurrent.ExecutionException;
 
 public class MainTest {
 
-    public static void main(String[] args) throws IOException, InterruptedException {
+    public static void main(String[] args) throws IOException, InterruptedException, ExecutionException {
         YT4J client = YT4J.builder("MrRagoona88")
                 .inputType(YT4J.InputType.USER)
                 .topChatOnly(true)
@@ -18,11 +19,11 @@ public class MainTest {
                 .onDelete(event -> System.out.println("삭제됨: " + event.targetId()))
                 .build();
 
-        boolean online = client.broadcastInfo().isLiveNow();
+        boolean online = client.broadcastInfoAsync().get().isLiveNow();
 
         if (online) {
             System.out.println("온라인 입니다!");
-            client.connect();
+            client.connectAsync();
         } else {
             System.out.println("온라인이 아닙니다!");
         }
